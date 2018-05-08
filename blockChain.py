@@ -8,10 +8,19 @@ from uuid import uuid4
 
 from flask import Flask, jsonify, request
 
+from urllib.parse import urlparse
+
+import requests
+
+import sys
+
+
 class Blockchain(object):
     def __init__(self):
         self.chain = []
         self.current_transactions = []
+
+        self.nodes = set()
 
         # ジェネシスブロックを作る
         self.new_block(previous_hash=1, proof=100)
@@ -71,6 +80,80 @@ class Blockchain(object):
             proof += 1
 
         return proof
+
+
+    def valid_chain(self, chain):
+        """
+        ブロックチェーンが正しいかを確認する
+
+        :param chain: <list> ブロックチェーン
+        :return: <bool> True であれば正しく、 False であればそうではない
+        """
+
+        last_block = chain[0]
+        current_index = 1
+
+        while current_index < len(chain):
+            block = chain[current_index]
+            print(f'{last_block}')
+            print(f'{block}')
+            print("\n--------------\n")
+
+            # ブロックのハッシュが正しいかを確認
+            if block['previous_hash'] != self.hash(last_block):
+                return False
+
+            # プルーフ・オブ・ワークが正しいかを確認
+            if not self.valid_proof(last_block['proof'], block['proof']):
+                return False
+
+            last_block = block
+            current_index += 1
+
+        return True
+
+    def resolve_conflicts(self):
+        """
+        これがコンセンサスアルゴリズムだ。ネットワーク上の最も長いチェーンで自らのチェーンを
+        置き換えることでコンフリクトを解消する。
+        :return: <bool> 自らのチェーンが置き換えられると True 、そうでなれけば False
+        """
+
+        neighbours = self.nodes
+        new_chain = None
+
+        # 自らのチェーンより長いチェーンを探す必要がある
+        max_length = len(self.chain)
+
+        # 他のすべてのノードのチェーンを確認
+        for node in neighbours:
+            response = requests.get(f'http://{node}/chain')
+
+            if response.status_code == 200:
+                length = response.json()['length']
+                chain = response.json()['chain']
+
+                # そのチェーンがより長いか、有効かを確認
+                if length > max_length and self.valid_chain(chain):
+                    max_length = length
+                    new_chain = chain
+
+        # もし自らのチェーンより長く、かつ有効なチェーンを見つけた場合それで置き換える
+        if new_chain:
+            self.chain = new_chain
+            return True
+
+        return False
+
+    def register_node(self, address):
+        """
+        ノードリストに新しいノードを加える
+        :param address: <str> ノードのアドレス 例: 'http://192.168.0.5:5000'
+        :return: None
+        """
+
+        parsed_url = urlparse(address)
+        self.nodes.add(parsed_url.netloc)
 
     @property
     def last_block(self):
@@ -168,6 +251,52 @@ def full_chain():
     }
     return jsonify(response), 200
 
+
+@app.route('/nodes/register', methods=['POST'])
+def register_node():
+    values = request.get_json()
+
+    nodes = values.get('nodes')
+    if nodes is None:
+        return "Error: 有効ではないノードのリストです", 400
+
+    for node in nodes:
+        blockchain.register_node(node)
+
+    response = {
+        'message': '新しいノードが追加されました',
+        'total_nodes': list(blockchain.nodes),
+    }
+    return jsonify(response), 201
+
+@app.route('/nodes/resolve', methods=['GET'])
+def consensus():
+    replaced = blockchain.resolve_conflicts()
+
+    if replaced:
+        response = {
+            'message': 'チェーンが置き換えられました',
+            'new_chain': blockchain.chain
+        }
+    else:
+        response = {
+            'message': 'チェーンが確認されました',
+            'chain': blockchain.chain
+        }
+
+    return jsonify(response), 200
+
 # port5000でサーバーを起動する
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+    arguments = sys.argv
+
+    if len(arguments) == 3:
+        if arguments[1] == "-P" and arguments[2].isdigit():
+            port = int(arguments[2])
+            app.run(host='0.0.0.0', port=port)
+
+        else:
+            print('適切なポート番号を指定してください。')
+
+    else:
+        print('ex. $ python3 blockchain.py -P 5000')
